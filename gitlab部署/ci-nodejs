@@ -1,0 +1,16 @@
+#runner 注册方式选用docker
+image: node:latest
+#nodejs 依赖设置缓存
+cache:
+  paths:
+    - node_modules/
+nodejs Job:
+  when: manual
+  script:
+    - npm install
+    - npm run build
+    - if [ -d dist ]; then cd dist/; fi && ls && scp -r * root@$addr:$paths
+  only:
+    - master
+  tags:
+    - docker
