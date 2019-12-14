@@ -1,0 +1,85 @@
+image: harbor.hseduyun.net/hs/gitlab-docker:harbor.hseduyun.net/hs/maven:v2
+
+#自定义参数运行流水线
+
+
+#定义maven缓存阶段
+#before_script:
+#  - ls
+#  - chmod +x deploy-ci.sh && ./deploy-ci.sh
+cache:
+  key: maven-repository-cache
+  paths:
+    - .m2
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2"
+#定义任务阶段
+stages:
+  - maven
+  - build
+  - runob
+  - release
+#定义maven阶段任务
+maven package job:
+  image: harbor.hseduyun.net/hs/maven:v2
+  tags:
+    - docker
+  stage: maven
+  when: manual
+  environment:
+    name: jenkins
+    url: https://cicd.hseduyun.net
+  script:
+    - env
+    - mvn clean install '-Dmaven.test.skip=true' -U
+  artifacts:
+    paths:
+      - ${PWD}/${package}/target/*.jar
+#定义build阶段docker image build
+docker build job:
+  image: harbor.hseduyun.net/hs/docker
+  tags:
+    - docker
+  stage: build
+  when: manual
+  script:
+    - tags=harbor.hseduyun.net/k8s/${env}-${package}:$CI_BUILD_ID
+#利用缓存目录.m2生成此次镜像id的flag
+    - echo $CI_BUILD_ID > .m2/flag
+    - cd ${PWD}/${package}/target/
+    - echo "FROM harbor.hseduyun.net/hs/jdk-1.8.0:v4" > Dockerfile
+    - echo "ADD ${package}-1.0-SNAPSHOT.jar /mnt/${package}-1.0-SNAPSHOT.jar" >> Dockerfile
+    - echo "WORKDIR /mnt" >> Dockerfile
+    - echo "CMD java -Djava.library.path=/usr/local/apr/lib -jar -Denv=${Denv} -Dapollo.cluster=${Cluster} /mnt/${package}-1.0-SNAPSHOT.jar --spring.profiles.active=${Config}" >> Dockerfile
+    - docker build -t ${tags} .
+    - docker login ${harborkey}
+    - docker push ${tags}
+Ob docker job:
+  stage: build
+  script:
+    - flags=$(cat .m2/flag)
+    - docker run --rm harbor.hseduyun.net/k8s/${env}-${package}:${flags} && echo "docker image seccess"
+  when: manual
+  tags:
+    - docker
+#定义k8s resease阶段
+k8s release job:
+  tags:
+    - docker
+  stage: release
+  when: manual
+  script:
+#取出docker构建阶段的tagid
+    - sh /usr/local/bin/gd.sh
+    - flags=$(cat .m2/flag)
+    - echo sed -i \'s/hsimage/harbor.hseduyun.net\\/k8s\\/${env}-${package}:${flags}/g\' ${package}.yaml > deploy.sh
+    - echo sed -i \'s/hsns/${env}/g\' ${package}.yaml >> deploy.sh
+    - echo sed -i \'s/hskw/${package}/g\' ${package}.yaml >> deploy.sh
+    - chmod +x deploy.sh && /bin/sh deploy.sh
+    - echo "FROM harbor.hseduyun.net/hs/kubectl-gci" > Dockerfile
+    - echo "COPY $package.yaml /tmp/$package.yaml" >> Dockerfile
+    - docker build -t $CI_BUILD_ID .
+    - docker run -i $CI_BUILD_ID --kubeconfig /usr/local/bin/conf apply -f /tmp/$package.yaml
+    - echo "kubernetes Publishing completed"
+  only:
+    - master
